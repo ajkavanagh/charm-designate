@@ -13,9 +13,12 @@
 # limitations under the License.
 
 
-import charm.openstack.designate as designate
 import charmhelpers.core.hookenv as hookenv
 import charms.reactive as reactive
+import charms_openstack.charm as openstack_charm
+
+import charm.openstack.designate as designate
+
 
 COMPLETE_INTERFACE_STATES = [
     'dns-backend.available',
@@ -25,53 +28,31 @@ COMPLETE_INTERFACE_STATES = [
 ]
 
 
-@reactive.when_not('installed')
-def install_packages():
-    """Install charms packages"""
-    designate.install()
-    reactive.set_state('installed')
-
-
-@reactive.when('amqp.connected')
-def setup_amqp_req(amqp):
-    """Send request fir rabbit access and vhost"""
-    amqp.request_access(username='designate',
-                        vhost='openstack')
-    designate.assess_status()
-
-
-@reactive.when('shared-db.connected')
-def setup_database(database):
-    """Send request designate accounts and dbs"""
-    database.configure('designate', 'designate',
-                       hookenv.unit_private_ip(), prefix='designate')
-    database.configure('dpm', 'dpm',
-                       hookenv.unit_private_ip(), prefix='dpm')
-    designate.assess_status()
-
-
-@reactive.when('identity-service.connected')
-def setup_endpoint(keystone):
-    """Register endpoints with keystone"""
-    designate.register_endpoints(keystone)
-    designate.assess_status()
+# wire in defaults for various interfaces and default states
+openstack_charm.use_defaults(
+    'charm.installed',
+    'amqp.connected',
+    'shared-db.connected',
+    'identity-service.connected',
+    'identity-service.available',  # Enables the SSL handler
+    'config.changed',
+    'update-status')
 
 
 @reactive.when_not('base-config.rendered')
 @reactive.when(*COMPLETE_INTERFACE_STATES)
-def configure_designate_basic(*args):
+@openstack_charm.optional_interface('cluster.available')
+@openstack_charm.provide_charm_instance
+def configure_designate_basic(designate_charm, *args):
     """Configure the minimum to boostrap designate"""
-    # If cluster relation is available it needs to passed in
-    cluster = reactive.RelationBase.from_state('cluster.available')
-    if cluster is not None:
-        args = args + (cluster, )
-    designate.render_base_config(args)
+    designate_charm.render_base_config(args)
     reactive.set_state('base-config.rendered')
 
 
 @reactive.when_not('db.synched')
 @reactive.when('base-config.rendered')
 @reactive.when(*COMPLETE_INTERFACE_STATES)
+@openstack_charm.provide_charm_instance
 def run_db_migration(*args):
     """Run database migrations"""
     designate.db_sync()
@@ -80,36 +61,29 @@ def run_db_migration(*args):
 
 
 @reactive.when('cluster.available')
-def update_peers(cluster):
+@openstack_charm.provide_charm_instance
+def update_peers(designate_charm, cluster):
     """Inform designate peers about this unit"""
-    designate.update_peers(cluster)
+    designate_charm.update_peers(cluster)
 
 
 @reactive.when('db.synched')
 @reactive.when(*COMPLETE_INTERFACE_STATES)
-def configure_designate_full(*args):
+@openstack_charm.optional_interface('cluster.available')
+@openstack_charm.provide_charm_instance
+def configure_designate_full(designate_charm, *args):
     """Write out all designate config include bootstrap domain info"""
-    # If cluster relation is available it needs to passed in
-    cluster = reactive.RelationBase.from_state('cluster.available')
-    if cluster is not None:
-        args = args + (cluster, )
-    designate.configure_ssl()
-    designate.render_full_config(args)
-    designate.create_initial_servers_and_domains()
-    designate.render_sink_configs(args)
-    designate.render_rndc_keys()
-    designate.update_pools()
+    designate_charm.configure_ssl()
+    designate_charm.render_full_config(args)
+    designate_charm.create_initial_servers_and_domains()
+    designate.render_sink_configs(args)  # Not on the charm class!
+    designate_charm.render_rndc_keys()
+    designate_charm.update_pools()
 
 
 @reactive.when('ha.connected')
-def cluster_connected(hacluster):
+@openstack_charm.provide_charm_instance
+def cluster_connected(designate_charm, hacluster):
     """Configure HA resources in corosync"""
-    designate.configure_ha_resources(hacluster)
-    designate.assess_status()
-
-
-@reactive.when('config.changed')
-def config_changed():
-    """When the configuration changes, assess the unit's status to update any
-    juju state required"""
-    designate.assess_status()
+    designate_charm.configure_ha_resources(hacluster)
+    designate_charm.assess_status()

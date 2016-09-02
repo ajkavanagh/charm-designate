@@ -18,7 +18,7 @@ import subprocess
 import uuid
 
 import charmhelpers.contrib.openstack.utils as ch_utils
-import charms_openstack.adapters as openstack_adapters
+import openstack_adapters as openstack_adapters
 import charms_openstack.charm as openstack_charm
 import charms_openstack.ip as os_ip
 import charmhelpers.core.decorators as decorators
@@ -34,66 +34,8 @@ NEUTRON_SINK_FILE = DESIGNATE_DIR + '/conf.d/neutron_sink.cfg'
 RC_FILE = '/root/novarc'
 
 
-def install():
-    """Use the singleton from the DesignateCharm to install the packages on the
-    unit
-
-    @returns: None
-    """
-    DesignateCharm.singleton.install()
-
-
-def db_sync_done():
-    """Use the singleton from the DesignateCharm to check if db migration has
-    been run
-
-    @returns: str or None. Str if sync has been done otherwise None
-    """
-    return DesignateCharm.singleton.db_sync_done()
-
-
-def db_sync():
-    """Use the singleton from the DesignateCharm to run db migration
-
-    @returns: None
-    """
-    DesignateCharm.singleton.db_sync()
-
-
-def render_base_config(interfaces_list):
-    """Use the singleton from the DesignateCharm to run render_base_config
-
-    @param interfaces_list: List of instances of interface classes.
-    @returns: None
-    """
-    DesignateCharm.singleton.render_base_config(interfaces_list)
-
-
-def create_initial_servers_and_domains():
-    """Use the singleton from the DesignateCharm to run create inital servers
-    and domains in designate
-
-    @returns: None
-    """
-    DesignateCharm.singleton.create_initial_servers_and_domains()
-
-
-def domain_init_done():
-    """Use the singleton from the DesignateCharm to check if inital servers
-    and domains have been created
-
-    @returns: str or None. Str if init has been done otherwise None
-    """
-    return DesignateCharm.singleton.domain_init_done()
-
-
-def render_full_config(interfaces_list):
-    """Use the singleton from the DesignateCharm to render all configs
-
-    @param interfaces_list: List of instances of interface classes.
-    @returns: None
-    """
-    DesignateCharm.singleton.render_full_config(interfaces_list)
+# select the default release function to choose the right Charm class
+openstack_charm.use_defaults('charm.default-select-release')
 
 
 def render_sink_configs(interfaces_list):
@@ -108,290 +50,191 @@ def render_sink_configs(interfaces_list):
         configs=configs)
 
 
-def register_endpoints(keystone):
-    """When the keystone interface connects, register this unit in the keystone
-    catalogue.
+# Get database URIs for the two designate databases
+@openstack_adapters.adapter_property('shared-db')
+def designate_uri(db):
+    """URI for designate DB"""
+    return db.get_uri(prefix='designate')
 
-    @param keystone: KeystoneRequires() interface class
-    @returns: None
+
+@openstack_adapters.adapter_property('shared-db')
+def designate_pool_uri(db):
+    """URI for designate pool DB"""
+    return db.get_uri(prefix='dpm')
+
+
+# dns specific adapter changes
+
+@openstack_adapters.adapter_property('dns')
+def slave_ips(dns):
+    """List of DNS slave address infoprmation
+
+    @returns: list [{'unit': unitname, 'address': 'address'},
+                    ...]
     """
-    charm = DesignateCharm.singleton
-    keystone.register_endpoints(charm.service_type,
-                                charm.region,
-                                charm.public_url,
-                                charm.internal_url,
-                                charm.admin_url)
+    return dns.relation.slave_ips()
 
 
-def configure_ha_resources(hacluster):
-    """Use the singleton from the DesignateCharm to run configure ha resources
+@openstack_adapters.adapter_property('dns')
+def pool_config(dns):
+    """List of DNS slave information from Juju attached DNS slaves
 
-    @param hacluster: OpenstackHAPeers() interface class
-    @returns: None
+    Creates a dict for each backends and returns a list of those dicts.
+    The designate config file has a section per backend. The template uses
+    the nameserver and pool_target names to create a section for each
+    backend
+
+    @returns: list [{'nameserver': name, 'pool_target': name,
+                     'address': slave_ip_addr},
+                    ...]
     """
-    DesignateCharm.singleton.configure_ha_resources(hacluster)
+    pconfig = []
+    for slave in dns.slave_ips:
+        unit_name = slave['unit'].replace('/', '_').replace('-', '_')
+        pconfig.append({
+            'nameserver': 'nameserver_{}'.format(unit_name),
+            'pool_target': 'nameserver_{}'.format(unit_name),
+            'address': slave['address'],
+        })
+    return pconfig
 
 
-def restart_all():
-    """Use the singleton from the DesignateCharm to restart all registered
-    services
+@openstack_adapters.adapter_property('dns')
+def pool_targets(dns):
+    """List of pool_target section names
 
-    @returns: None
+    @returns: str Comma delimited list of pool_target section names
     """
-    DesignateCharm.singleton.restart_all()
+    return ', '.join([s['pool_target'] for s in dns.pool_config])
 
 
-def configure_ssl(keystone=None):
-    """Use the singleton from the DesignateCharm to configure ssl
+@openstack_adapters.adapter_property('dns')
+def slave_addresses(dns):
+    """List of slave IP addresses
 
-    @param keystone: KeystoneRequires() interface class
-    @returns: None
+    @returns: str Comma delimited list of slave IP addresses
     """
-    DesignateCharm.singleton.configure_ssl(keystone)
+    return ', '.join(['{}:53'.format(s['address'])
+                     for s in dns.pool_config])
 
 
-def update_peers(hacluster):
-    """Use the singleton from the DesignateCharm to update peers with detials
-    of this unit
+@openstack_adapters.adapter_property('dns')
+def rndc_info(dns):
+    """Rndc key and algorith in formation.
 
-    @param hacluster: OpenstackHAPeers() interface class
-    @returns: None
+    @returns: dict {'algorithm': rndc_algorithm,
+                    'secret': rndc_secret_digest}
     """
-    DesignateCharm.singleton.update_peers(hacluster)
+    return dns.relation.rndc_info
 
 
-def render_rndc_keys():
-    """Use the singleton from the DesignateCharm write out rndc key files
+## configuration adapter custom properties
 
-    @returns: None
+@openstack_adapters.config_property
+def pool_config(config):
+    """List of DNS slave information from user defined config
+
+    Creates a dict for each backends and returns a list of those dicts.
+    The designate config file has a section per backend. The template uses
+    the nameserver and pool_target names to create a section for each
+    backend.
+
+    @returns: list [{'nameserver': name,
+                     'pool_target': name,
+                     'address': slave_ip_addr,
+                     'rndc_key_file': rndc_key_file},
+                    ...]
     """
-    DesignateCharm.singleton.render_rndc_keys()
+    pconfig = []
+    for entry in config.dns_slaves.split():
+        address, port, key = entry.split(':')
+        unit_name = address.replace('.', '_')
+        pconfig.append({
+            'nameserver': 'nameserver_{}'.format(unit_name),
+            'pool_target': 'nameserver_{}'.format(unit_name),
+            'address': address,
+            'rndc_key_file': '/etc/designate/rndc_{}.key'.format(
+                unit_name),
+        })
+    return pconfig
 
 
-def assess_status():
-    """Just call the DesignateCharm.singleton.assess_status() command to update
-    status on the unit.
+@openstack_adapters.config_property
+def pool_targets(config):
+    """List of pool_target section names
 
-    @returns: None
+    @returns: str Comma delimited list of pool_target section names
     """
-    DesignateCharm.singleton.assess_status()
+    return ', '.join([s['pool_target'] for s in config.pool_config])
 
 
-def update_pools():
-    """Just call the DesignateCharm.singleton.update_pools() command to update
-    pool info in the db
+@openstack_adapters.config_property
+def slave_addresses(config):
+    """List of slave IP addresses
 
-    @returns: None
+    @returns: str Comma delimited list of slave IP addresses
     """
-    DesignateCharm.singleton.update_pools()
+    return ', '.join(['{}:53'.format(s['address'])
+                     for s in config.pool_config])
 
 
-class DesignateDBAdapter(openstack_adapters.DatabaseRelationAdapter):
-    """Get database URIs for the two designate databases"""
+@openstack_adapters.config_property
+def nova_domain_id(config):
+    """Returns the id of the domain corresponding to the user supplied
+    'nova-domain'
 
-    def __init__(self, relation):
-        super(DesignateDBAdapter, self).__init__(relation)
-
-    @property
-    def designate_uri(self):
-        """URI for designate DB"""
-        return self.get_uri(prefix='designate')
-
-    @property
-    def designate_pool_uri(self):
-        """URI for designate pool DB"""
-        return self.get_uri(prefix='dpm')
-
-
-class BindRNDCRelationAdapter(openstack_adapters.OpenStackRelationAdapter):
-
-    interface_type = "dns"
-
-    def __init__(self, relation):
-        super(BindRNDCRelationAdapter, self).__init__(relation)
-
-    @property
-    def slave_ips(self):
-        """List of DNS slave address infoprmation
-
-        @returns: list [{'unit': unitname, 'address': 'address'},
-                        ...]
-        """
-        return self.relation.slave_ips()
-
-    @property
-    def pool_config(self):
-        """List of DNS slave information from Juju attached DNS slaves
-
-        Creates a dict for each backends and returns a list of those dicts.
-        The designate config file has a section per backend. The template uses
-        the nameserver and pool_target names to create a section for each
-        backend
-
-        @returns: list [{'nameserver': name, 'pool_target': name,
-                         'address': slave_ip_addr},
-                        ...]
-        """
-        pconfig = []
-        for slave in self.slave_ips:
-            unit_name = slave['unit'].replace('/', '_').replace('-', '_')
-            pconfig.append({
-                'nameserver': 'nameserver_{}'.format(unit_name),
-                'pool_target': 'nameserver_{}'.format(unit_name),
-                'address': slave['address'],
-            })
-        return pconfig
-
-    @property
-    def pool_targets(self):
-        """List of pool_target section names
-
-        @returns: str Comma delimited list of pool_target section names
-        """
-        return ', '.join([s['pool_target'] for s in self.pool_config])
-
-    @property
-    def slave_addresses(self):
-        """List of slave IP addresses
-
-        @returns: str Comma delimited list of slave IP addresses
-        """
-        return ', '.join(['{}:53'.format(s['address'])
-                         for s in self.pool_config])
-
-    @property
-    def rndc_info(self):
-        """Rndc key and algorith in formation.
-
-        @returns: dict {'algorithm': rndc_algorithm,
-                        'secret': rndc_secret_digest}
-        """
-        return self.relation.rndc_info
-
-
-class DesignateConfigurationAdapter(
-      openstack_adapters.APIConfigurationAdapter):
-
-    def __init__(self, port_map=None):
-        super(DesignateConfigurationAdapter, self).__init__(
-            port_map=port_map,
-            service_name='designate')
-
-    @property
-    def pool_config(self):
-        """List of DNS slave information from user defined config
-
-        Creates a dict for each backends and returns a list of those dicts.
-        The designate config file has a section per backend. The template uses
-        the nameserver and pool_target names to create a section for each
-        backend.
-
-        @returns: list [{'nameserver': name,
-                         'pool_target': name,
-                         'address': slave_ip_addr,
-                         'rndc_key_file': rndc_key_file},
-                        ...]
-        """
-        pconfig = []
-        for entry in self.dns_slaves.split():
-            address, port, key = entry.split(':')
-            unit_name = address.replace('.', '_')
-            pconfig.append({
-                'nameserver': 'nameserver_{}'.format(unit_name),
-                'pool_target': 'nameserver_{}'.format(unit_name),
-                'address': address,
-                'rndc_key_file': '/etc/designate/rndc_{}.key'.format(
-                    unit_name),
-            })
-        return pconfig
-
-    @property
-    def pool_targets(self):
-        """List of pool_target section names
-
-        @returns: str Comma delimited list of pool_target section names
-        """
-        return ', '.join([s['pool_target'] for s in self.pool_config])
-
-    @property
-    def slave_addresses(self):
-        """List of slave IP addresses
-
-        @returns: str Comma delimited list of slave IP addresses
-        """
-        return ', '.join(['{}:53'.format(s['address'])
-                         for s in self.pool_config])
-
-    @property
-    def nova_domain_id(self):
-        """Returns the id of the domain corresponding to the user supplied
-        'nova-domain'
-
-        @returns nova domain id
-        """
-        domain = hookenv.config('nova-domain')
-        if domain:
-            return DesignateCharm.get_domain_id(domain)
-        return None
-
-    @property
-    def neutron_domain_id(self):
-        """Returns the id of the domain corresponding to the user supplied
-        'neutron-domain'
-
-        @returns neutron domain id
-        """
-        domain = hookenv.config('neutron-domain')
-        if domain:
-            return DesignateCharm.get_domain_id(domain)
-        return None
-
-    @property
-    def nova_conf_args(self):
-        """Returns config file directive to point daemons at nova config file.
-        These directives are designed to be used in /etc/default/ files
-
-        @returns startup config file option
-        """
-        daemon_arg = ''
-        if os.path.exists(NOVA_SINK_FILE):
-            daemon_arg = '--config-file={}'.format(NOVA_SINK_FILE)
-        return daemon_arg
-
-    @property
-    def neutron_conf_args(self):
-        """Returns config file directive to point daemons at neutron config
-        file. These directives are designed to be used in /etc/default/ files
-
-        @returns startup config file option
-        """
-        daemon_arg = ''
-        if os.path.exists(NEUTRON_SINK_FILE):
-            daemon_arg = '--config-file={}'.format(NEUTRON_SINK_FILE)
-        return daemon_arg
-
-    @property
-    def rndc_master_ip(self):
-        """Returns IP address slave DNS slave should use to query master
-        """
-        return os_ip.resolve_address(endpoint_type=os_ip.INTERNAL)
-
-
-class DesignateAdapters(openstack_adapters.OpenStackAPIRelationAdapters):
+    @returns nova domain id
     """
-    Adapters class for the Designate charm.
-    """
-    relation_adapters = {
-        'shared_db': DesignateDBAdapter,
-        'cluster': openstack_adapters.PeerHARelationAdapter,
-        'dns_backend': BindRNDCRelationAdapter,
-    }
+    domain = hookenv.config('nova-domain')
+    if domain:
+        return DesignateCharm.get_domain_id(domain)
+    return None
 
-    def __init__(self, relations):
-        super(DesignateAdapters, self).__init__(
-            relations,
-            options_instance=DesignateConfigurationAdapter(
-                port_map=DesignateCharm.api_ports))
+
+@openstack_adapters.config_property
+def neutron_domain_id(config):
+    """Returns the id of the domain corresponding to the user supplied
+    'neutron-domain'
+
+    @returns neutron domain id
+    """
+    domain = hookenv.config('neutron-domain')
+    if domain:
+        return DesignateCharm.get_domain_id(domain)
+    return None
+
+
+@openstack_adapters.config_property
+def nova_conf_args(config):
+    """Returns config file directive to point daemons at nova config file.
+    These directives are designed to be used in /etc/default/ files
+
+    @returns startup config file option
+    """
+    daemon_arg = ''
+    if os.path.exists(NOVA_SINK_FILE):
+        daemon_arg = '--config-file={}'.format(NOVA_SINK_FILE)
+    return daemon_arg
+
+
+@openstack_adapters.config_property
+def neutron_conf_args(config):
+    """Returns config file directive to point daemons at neutron config
+    file. These directives are designed to be used in /etc/default/ files
+
+    @returns startup config file option
+    """
+    daemon_arg = ''
+    if os.path.exists(NEUTRON_SINK_FILE):
+        daemon_arg = '--config-file={}'.format(NEUTRON_SINK_FILE)
+    return daemon_arg
+
+
+@openstack_adapters.config_property
+def rndc_master_ip(config):
+    """Returns IP address slave DNS slave should use to query master
+    """
+    return os_ip.resolve_address(endpoint_type=os_ip.INTERNAL)
 
 
 class DesignateCharm(openstack_charm.HAOpenStackCharm):
@@ -431,26 +274,43 @@ class DesignateCharm(openstack_charm.HAOpenStackCharm):
     service_type = 'designate'
     default_service = 'designate-api'
     sync_cmd = ['designate-manage', 'database', 'sync']
-    adapters_class = DesignateAdapters
 
     ha_resources = ['vips', 'haproxy']
     release = 'mitaka'
 
-    def __init__(self, release=None, **kwargs):
-        """Custom initialiser for class
-        If no release is passed, then the charm determines the release from the
-        ch_utils.os_release() function.
-        """
-        if release is None:
-            release = ch_utils.os_release('python-keystonemiddleware')
-        super(DesignateCharm, self).__init__(release=release, **kwargs)
+    def get_amqp_credentials(self):
+        """Provide the default amqp username and vhost as a tuple.
 
-    def install(self):
-        """Customise the installation, configure the source and then call the
-        parent install() method to install the packages
+        :returns (username, host): two strings to send to the amqp provider.
         """
-        self.configure_source()
-        super(DesignateCharm, self).install()
+        return ('designate', 'openstack')
+
+    def get_database_setup(self):
+        """Provide the default database credentials as a list of 3-tuples
+
+        returns a structure of:
+        [
+            {'database': <database>,
+             'username': <username>,
+             'hostname': <hostname of this unit>
+             'prefix': <the optional prefix for the database>, },
+        ]
+
+        :returns [{'database': ...}, ...]: credentials for multiple databases
+        """
+        ip = hookenv.unit_private_ip()
+        return [
+            dict(
+                database='designate',
+                username='designate',
+                hostname=ip,
+                prefix='designate'),
+            dict(
+                database='dpm',
+                username='dpm',
+                prefix='dpm',
+                hostname=ip)
+        ]
 
     def render_base_config(self, interfaces_list):
         """Render initial config to bootstrap Designate service
@@ -545,7 +405,8 @@ class DesignateCharm(openstack_charm.HAOpenStackCharm):
                       '--server-name', nsname]
         subprocess.check_call(create_cmd)
 
-    def domain_init_done(self):
+    @classmethod
+    def domain_init_done(cls):
         """Query leader db to see if domain creation is donei
 
         @returns boolean"""

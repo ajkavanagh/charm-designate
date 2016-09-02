@@ -148,7 +148,6 @@ if __name__ == '__main__':
         'domain-list': display_domains,
         'server-list': display_servers,
     }
-    cmd_args = []
     parser = argparse.ArgumentParser(description='Manage designate.')
     parser.add_argument('command',
                         help='One of: {}'.format(', '.join(commands.keys())))
@@ -156,14 +155,12 @@ if __name__ == '__main__':
     parser.add_argument('--server-name', help='Server Name')
     parser.add_argument('--email', help='Email Address')
     args = parser.parse_args()
-    if args.domain_name:
-        cmd_args.append(args.domain_name)
-    if args.server_name:
-        cmd_args.append(args.server_name)
-    if args.email:
-        cmd_args.append(args.email)
-
-    if cmd_args:
-        commands[args.command](*cmd_args)
-    else:
-        commands[args.command]()
+    # extract domain_name, server_name, email if they exist into a dictionary
+    # to pass to the command -- this enforces that the right thing is passed to
+    # a function that is expecting an argument.
+    cmd_args = {v: a
+                for v, a in zip(
+                        ('domain_name', 'server_name', 'domain_email'),
+                        (args.domain_name, args.server_name, args.email))
+                if a}
+    commands[args.command](**cmd_args)
